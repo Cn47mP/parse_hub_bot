@@ -16,7 +16,9 @@ from i18n import ISO639_MAP
 from log import logger, setup_logging
 from plugins.admin.alert import send_cookie_alert
 from plugins.helpers import ADMIN_COMMANDS, COMMANDS
-from services import cookie_health, parse_cache
+from plugins.parse.queue import parse_queue
+from services import cookie_health, parse_cache, persistent_cache
+from utils.bili_patch import apply as apply_bili_patch
 from utils.event_loop import setup_optimized_event_loop
 
 pillow_heif.register_heif_opener()
@@ -24,6 +26,9 @@ pillow_heif.register_heif_opener()
 setup_logging(debug=bs.debug)
 if bs.debug:
     logger.enable("parsehub")
+
+# parsehub 的 B 站视频详情请求未带 buvid3 指纹, 会被 B 站 412 风控拦截; 提前修补
+apply_bili_patch()
 
 setup_optimized_event_loop()
 loop = asyncio.new_event_loop()
@@ -40,6 +45,7 @@ class Bot(Client):
             bot_token=self.cfg.bot_token,
             plugins={"root": "plugins"},
             proxy=self.cfg.bot_proxy,
+            ipv6=self.cfg.bot_ipv6,
             loop=loop,
             workdir=self.cfg.sessions_path,
         )
@@ -50,6 +56,18 @@ class Bot(Client):
         logger.info("初始化数据库...")
         await init_db()
         logger.success("数据库初始化完成")
+        await parse_queue.start()
+
+        # 启动时清空缓存：旧 file_id 缓存会导致同链接直接发旧视频（绕过转码），
+        # 使新代码的 faststart/转码逻辑永远不生效。清空后首次请求必重新解析+转码。
+        cleared_db = await persistent_cache.clear_all()
+        await parse_cache.clear()
+        logger.info(f"启动时清空缓存: persistent={cleared_db} 条, parse_cache 已清空")
+
+        # 启动时清残留下载目录: 上一次进程被硬杀会留下未清理的 downloads
+        if self.cfg.download_dir.exists() and not self.cfg.debug_skip_cleanup:
+            shutil.rmtree(self.cfg.download_dir, ignore_errors=True)
+            logger.info("启动时已清理残留 downloads 目录")
 
         parse_cache.start_cleanup()
         cookie_health.set_notifier(partial(send_cookie_alert, self))
@@ -60,6 +78,7 @@ class Bot(Client):
 
     async def stop(self, *args: Any, **kwargs: Any) -> Client:
         ws.exit_flag = True
+        await parse_queue.stop()
         await super().stop(*args, **kwargs)
         await close_db()
         # 结束时清理下载残留

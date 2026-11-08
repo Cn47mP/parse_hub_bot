@@ -11,6 +11,7 @@ from PIL import Image
 from log import logger
 from utils.helpers import to_list
 from utils.media_processing_unit import MediaProcessingUnit
+from core import bs
 
 
 @dataclass
@@ -70,7 +71,14 @@ def progress(current: int, total: int, unit: ProgressUnit, _t: PreLocaleSelector
 async def process_media_files(download_result: DownloadResult) -> list[ProcessedMedia]:
     """对下载结果中的媒体文件进行处理，返回 ProcessedMedia 列表"""
     processed_dir = download_result.output_dir.joinpath("processed")
-    processor = MediaProcessingUnit(processed_dir, segment_height=1920, logger=logger.bind(name="MediaProcessor").debug)
+    processor = MediaProcessingUnit(
+        processed_dir,
+        segment_height=1920,
+        logger=logger.bind(name="MediaProcessor").info,
+        autoplay_safe_transcode=bs.autoplay_safe_transcode,
+        skip_max_duration=bs.autoplay_skip_transcode_max_duration,
+        skip_max_size=bs.autoplay_skip_transcode_max_size,
+    )
     media_files = to_list(download_result.media)
     logger.debug(f"开始媒体处理: 文件数={len(media_files)}, output_dir={processed_dir}")
     processed_list: list[ProcessedMedia] = []

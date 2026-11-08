@@ -20,11 +20,36 @@ class BotSettings(BaseSettings):
     api_id: str = Field(...)
     api_hash: str = Field(...)
     bot_proxy: str | None = Field(default=None)
+    bot_ipv6: bool = Field(default=False, description="使用 IPv6 连接 Telegram (IPv6-only 服务器需开启)")
     data_path: Path = Field(default=Path("data"))
     language: str = Field(default="zh-hans")
     admin_ids: Annotated[list[int], NoDecode] = Field(default=[], description="Bot 管理员 ID, 逗号分隔")
+    allowed_users: Annotated[list[int], NoDecode] = Field(
+        default=[223347749, 145047838],
+        description="白名单用户 ID, 逗号分隔; 空列表=不限制",
+    )
     cache_max_entries: int = Field(default=30000, ge=0, description="缓存最大条数, 0 为不限制")
+    max_concurrent_downloads: int = Field(
+        default=8, ge=1,
+        description="最大并发处理条数(同时下载/转码/上传), 限制 downloads 磁盘峰值",
+    )
     cache_disabled: bool = Field(default=False, description="禁用缓存")
+
+    # ---- 自动播放安全转码 ----
+    # 发送前是否强制把视频转成 TG 可流式播放的 H.264+AAC+faststart MP4。
+    # 开启后保证手机/桌面端信息流静音自动播放，代价是 HEVC/AV1 源可能需软件转码（耗时）。
+    # 关闭后完全退回旧行为（仅 remux 换壳，HEVC 源仍无法自动播放）。
+    autoplay_safe_transcode: bool = Field(
+        default=True,
+        description="发送前强制转码为可流式播放的 H.264 MP4; 关闭则退回旧行为",
+    )
+    # 无硬件编码器时，超过该时长/体积的 HEVC 源跳过转码直发原文件（性能与体验取舍），避免 bot 卡死
+    autoplay_skip_transcode_max_duration: float = Field(
+        default=600, gt=0, description="超过该时长(秒)且无硬件编码时跳过转码直发"
+    )
+    autoplay_skip_transcode_max_size: int = Field(
+        default=500 * 1000**2, gt=0, description="超过该体积(字节)且无硬件编码时跳过转码直发"
+    )
 
     rate_limit_enabled: bool = Field(default=False, description="启用解析速率限制")
     rate_limit_burst: int = Field(default=5, ge=0, description="突发请求阈值, 0 为不限制")
@@ -65,7 +90,7 @@ class BotSettings(BaseSettings):
     def bot_session_name(self) -> str:
         return f"bot_{self.bot_token.split(':')[0]}"
 
-    @field_validator("admin_ids", mode="before")
+    @field_validator("admin_ids", "allowed_users", mode="before")
     @classmethod
     def admin_ids_init(cls, v: str | list[int]) -> list[int] | list[str]:
         if isinstance(v, str):
@@ -94,3 +119,7 @@ class WatchdogSettings(BaseSettings):
 
 bs = BotSettings()  # type: ignore[call-arg]
 ws = WatchdogSettings()
+
+# 白名单：从 .env 的 ALLOWED_USERS 读取（逗号分隔），空列表 = 不限制（所有用户可用）
+# 改白名单只需编辑 .env 的 ALLOWED_USERS 并重启服务，无需改代码
+ALLOWED_PARSE_USERS: list[int] = bs.allowed_users

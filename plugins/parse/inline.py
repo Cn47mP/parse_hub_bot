@@ -11,7 +11,7 @@ from parsehub.types import (
     RichTextParseResult,
     VideoRef,
 )
-from pyrogram import Client
+from pyrogram import Client, filters
 from pyrogram.types import (
     ChosenInlineResult,
     InlineQuery,
@@ -39,6 +39,7 @@ from pyrogram.types import (
     InlineKeyboardMarkup as Ikm,
 )
 
+from core import ALLOWED_PARSE_USERS
 from db import get_session
 from i18n import t_
 from log import logger
@@ -88,7 +89,7 @@ LINK_ICON_WIDTH = 72
 LINK_ICON_HEIGHT = 72
 
 
-@Client.on_inline_query(~platform_filter(False))
+@Client.on_inline_query(~platform_filter(False) & filters.user(ALLOWED_PARSE_USERS))
 async def inline_parse_tip(_: Client, inline_query: InlineQuery) -> None:
     async with get_session() as session:
         lang = await UserService(session).get_lang(inline_query.from_user.id)
@@ -106,7 +107,7 @@ async def inline_parse_tip(_: Client, inline_query: InlineQuery) -> None:
     await inline_query.answer(results=results, cache_time=1)
 
 
-@Client.on_inline_query(platform_filter(False))
+@Client.on_inline_query(platform_filter(False) & filters.user(ALLOWED_PARSE_USERS))
 @with_request_id
 async def call_inline_parse(cli: Client, inline_query: InlineQuery) -> None:
     logger.info(f"收到内联解析请求: query={inline_query.query}, from_user={inline_query.from_user.id}")

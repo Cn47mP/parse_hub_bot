@@ -1,13 +1,12 @@
 import asyncio
 import re
-from collections.abc import Awaitable
 from dataclasses import replace
 
 from parsehub.types import AniRef, RichTextParseResult
 from pyrogram import Client, filters
 from pyrogram.types import InputRichMessage, Message
 
-from core import bs
+from core import ALLOWED_PARSE_USERS, bs
 from db import get_session
 from i18n import t_
 from log import logger
@@ -20,6 +19,7 @@ from plugins.filters import (
 )
 from plugins.helpers import build_caption, create_richtext_telegraph, format_label
 from plugins.parse.context import GIF_ONLY_SKIP_DOWNLOAD_COUNT_THRESHOLD, ParseOptions, ParseRequest
+from plugins.parse.queue import parse_queue
 from plugins.parse.reporters import MessageStatusReporter, disable_progress_on_report_forbidden
 from plugins.parse.rich import build_rich_media_blocks, is_rich_media_result, rich_caption_blocks
 from plugins.parse.sender import (
@@ -39,30 +39,55 @@ from utils.rate_limit import ParseRateLimitExceeded, parse_rate_limit
 
 logger = logger.bind(name="Parse")
 
-_bg: set[asyncio.Task[None]] = set()
 
+@Client.on_message(
+    filters.command(["pause", "resume", "stopqueue", "queuestatus"])
+    & filters.user(ALLOWED_PARSE_USERS)
+)
+async def queue_control(cli: Client, msg: Message) -> None:
+    """解析队列控制: /pause /resume /stopqueue /queuestatus"""
+    lang = None
+    if msg.from_user:
+        async with get_session() as session:
+            lang = await UserService(session).get_lang(msg.from_user.id)
+    _t = t_[lang]
 
-def _on_done(task: asyncio.Task[None]) -> None:
-    _bg.discard(task)
-    if not task.cancelled() and (exc := task.exception()) is not None:
-        logger.opt(exception=exc).error("后台解析任务异常")
-
-
-def spawn(coro: Awaitable[None]) -> None:
-    task = asyncio.ensure_future(coro)
-    _bg.add(task)
-    task.add_done_callback(_on_done)
+    cmd = msg.command[0]
+    if cmd == "pause":
+        parse_queue.pause()
+        text = _t("解析队列已暂停, 进行中的任务不受影响")
+    elif cmd == "resume":
+        parse_queue.resume()
+        text = _t("解析队列已恢复")
+    elif cmd == "stopqueue":
+        cleared = parse_queue.clear_pending()
+        text = f"{_t('已清空待处理队列')}: {cleared} {_t('条')}; {_t('进行中的任务不受影响')}"
+    else:  # queuestatus
+        s = parse_queue.status()
+        state = _t("运行中") if s["running"] else _t("未启动")
+        if s["paused"]:
+            state = _t("已暂停")
+        text = (
+            f"{_t('队列状态')}: {state}\n"
+            f"{_t('已完成')}: {s['done']} / {_t('总数')}: {s['total']}\n"
+            f"{_t('剩余')}: {s['pending']}\n"
+            f"{_t('当前并发')}: {s['concurrency']}"
+        )
+    await msg.reply(format_label(text))
 
 
 @Client.on_message(
-    filters.command(["jx", "jxjx", "raw", "zip"])
-    | (
-        (filters.text | filters.caption)
-        & ~via_me_filter
-        & platform_filter(True)
-        & ~forwarded_from_bot_filter
-        & allow_channel_auto_forward_parse_filter
+    (
+        filters.command(["jx", "jxjx", "raw", "zip"])
+        | (
+            (filters.text | filters.caption)
+            & ~via_me_filter
+            & platform_filter(True)
+            & ~forwarded_from_bot_filter
+            & allow_channel_auto_forward_parse_filter
+        )
     )
+    & filters.user(ALLOWED_PARSE_USERS)
 )
 async def parse(cli: Client, msg: Message) -> None:
     bypass_cache = False
@@ -99,7 +124,7 @@ async def parse(cli: Client, msg: Message) -> None:
         text = msg.text or msg.caption or ""
 
     lines = text.strip().split()
-    urls = list({i for i in lines if ParseService().parser.get_platform(i)})[:10]
+    urls = list({i for i in lines if ParseService().parser.get_platform(i)})
 
     if not urls:
         await MessageSender(cli, msg, config).text(format_label(_t("不支持的平台")))
@@ -113,26 +138,36 @@ async def parse(cli: Client, msg: Message) -> None:
         items: list[str] = [m.group(2) for m in re.finditer(r"^(={2})(.*?)\1", raw_text, flags=re.S | re.M)]
         custom_content = items[0].strip() if items else ""
 
-    for url in urls:
-        spawn(
-            _handle_parse_request(
-                ParseRequest(
-                    cli=cli,
-                    msg=msg,
-                    url=url,
-                    mode=mode,
-                    config=config,
-                    t_=_t,
-                    bypass_cache=bypass_cache,
-                    delete_share_url_msg=config.auto_delete_url,
-                    custom_content=custom_content,
-                )
-            )
+    requests = [
+        ParseRequest(
+            cli=cli,
+            msg=msg,
+            url=url,
+            mode=mode,
+            config=config,
+            t_=_t,
+            bypass_cache=bypass_cache,
+            delete_share_url_msg=config.auto_delete_url,
+            custom_content=custom_content,
         )
+        for url in urls
+    ]
+    try:
+        enqueued = await parse_queue.submit(requests)
+    except RuntimeError:
+        logger.exception("解析队列未启动，无法提交解析请求")
+        await msg.reply(format_label(_t("解析队列暂不可用，请稍后重试")))
+        return
+    if len(requests) > 1 or enqueued == 0:
+        skipped = len(requests) - enqueued
+        text = f"{_t('已加入解析队列')}: {enqueued} {_t('条')}"
+        if skipped:
+            text += f", {_t('跳过已完成')}: {skipped} {_t('条')}; {_t('如需重解析请使用 /jxjx')}"
+        await msg.reply(format_label(text))
 
 
 @with_request_id
-async def _handle_parse_request(req: ParseRequest) -> None:
+async def _handle_parse_request(req: ParseRequest) -> bool:
     try:
         r = await handle_parse(req)
     except ParseRateLimitExceeded as e:
@@ -147,15 +182,17 @@ async def _handle_parse_request(req: ParseRequest) -> None:
                     "**开源地址: [GitHub](https://github.com/z-mio/parse_hub_bot)**"
                 )
             await MessageSender(req.cli, req.msg, req.config).delete_after(e.retry_after).text_no_preview(text)
+        return False
     else:
         if not r:
-            return
+            return False
         if req.delete_share_url_msg:
             logger.debug(f"自动删除分享链接消息: chat_id={req.chat_id}, msg_id: {req.msg.id}")
             try:
                 await req.msg.delete()
             except Exception as e:
                 logger.warning(f"删除分享链接消息失败: chat_id={req.chat_id}, msg_id: {req.msg.id}, error: {e}")
+        return True
 
 
 def _get_parse_user_id(req: ParseRequest) -> int | None:
@@ -174,7 +211,8 @@ async def handle_parse(req: ParseRequest) -> bool:
     )
     sender = MessageSender(req.cli, req.msg, req.config)
     try:
-        raw_url = await ParseService().get_raw_url(req.url)
+        # get_raw_url 在 pipeline 之外，无 _step 的超时保护；加 60s 兜底防止抖音 API 挂死
+        raw_url = await asyncio.wait_for(ParseService().get_raw_url(req.url), timeout=60)
     except Exception as e:
         await reporter.report_error(req.t_("获取原始链接"), e)
         return False

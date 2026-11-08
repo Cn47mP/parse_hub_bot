@@ -1,4 +1,3 @@
-import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -64,15 +63,8 @@ class MessageStatusReporter(StatusReporter):
             text,
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
-        if self._config.keep_error_log:
-            return
-
-        async def fn() -> None:
-            await asyncio.sleep(15)
-            await self.dismiss()
-
-        loop = asyncio.get_running_loop()
-        loop.create_task(fn())
+        # 错误消息一律保留, 不再定时删除 (keep_error_log 默认 True)
+        return
 
     async def dismiss(self) -> None:
         if self._msg:
@@ -131,19 +123,8 @@ class InlineStatusReporter(StatusReporter):
             inline_message_id=self._mid, text=text, link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
 
-        if self._user_config.keep_error_log:
-            return
-
-        async def fn() -> None:
-            await asyncio.sleep(15)
-            await self._edit_inline_text(
-                inline_message_id=self._mid,
-                text=self._caption,
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-            )
-
-        loop = asyncio.get_running_loop()
-        loop.create_task(fn())
+        # 错误消息一律保留, 不再定时还原 (keep_error_log 默认 True)
+        return
 
     async def _edit_inline_text(self, **kwargs: Any) -> None:
         try:

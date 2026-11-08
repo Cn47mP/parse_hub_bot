@@ -1,5 +1,6 @@
 import asyncio
 import os
+import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
@@ -18,6 +19,7 @@ from parsehub.types import (
     MusicFile,
     VideoFile,
 )
+from utils.tg_live_photo import send_live_photos
 from pyrogram import Client, enums
 from pyrogram.errors import FloodWait, Forbidden, SlowmodeWait, WebpageCurlFailed, WebpageMediaEmpty
 from pyrogram.types import (
@@ -234,7 +236,7 @@ class MessageSender:
         video: PathType | BinaryIO,
         *,
         caption: str | None = None,
-        video_cover: PathType | BinaryIO | None = None,
+        thumb: PathType | BinaryIO | None = None,
         duration: int | None = None,
         width: int | None = None,
         height: int | None = None,
@@ -247,7 +249,7 @@ class MessageSender:
                     self.msg.reply_video if self.config.reply_msg else self.msg.answer_video,
                     video,
                     caption=caption or "",
-                    video_cover=video_cover,
+                    thumb=thumb,
                     duration=duration or 0,
                     width=width or 0,
                     height=height or 0,
@@ -261,7 +263,7 @@ class MessageSender:
         video: PathType | BinaryIO,
         *,
         caption: str | None = None,
-        video_cover: PathType | BinaryIO | None = None,
+        thumb: PathType | BinaryIO | None = None,
         duration: int | None = None,
         width: int | None = None,
         height: int | None = None,
@@ -269,7 +271,7 @@ class MessageSender:
         return await self.video(
             video,
             caption=caption,
-            video_cover=video_cover,
+            thumb=thumb,
             duration=duration,
             width=width,
             height=height,
@@ -281,7 +283,7 @@ class MessageSender:
         video: PathType | BinaryIO,
         *,
         caption: str | None = None,
-        video_cover: PathType | BinaryIO | None = None,
+        thumb: PathType | BinaryIO | None = None,
         duration: int | None = None,
         width: int | None = None,
         height: int | None = None,
@@ -290,7 +292,7 @@ class MessageSender:
             return await self.streaming_video(
                 video,
                 caption=caption,
-                video_cover=video_cover,
+                thumb=thumb,
                 duration=duration,
                 width=width,
                 height=height,
@@ -475,6 +477,63 @@ async def send_zip(
             os.remove(pack_path)
 
 
+async def _prefetch_covers(media_refs: Sequence[AnyMediaRef], tmpdir: Path) -> dict[str, str]:
+    """把视频封面 URL 预下载为本地 JPEG 再上传。
+
+    Telegram 服务端直接去抓远程 URL 拉封面不可靠: 会触发 WEBPAGE_CURL_FAILED,
+    且实测同一视频用 URL 封面发出后客户端不自动播放, 改成本地封面即正常。
+    下载失败则回退为不传封面, 由 Telegram 自动抽取首帧。
+    """
+    covers: dict[str, str] = {}
+    for idx, ref in enumerate(media_refs):
+        url = getattr(ref, "thumb_url", None)
+        if not url:
+            continue
+        local = await fetch_thumb(str(url), tmpdir / f"_cover_{idx}.jpg")
+        if local:
+            covers[str(url)] = local
+        else:
+            logger.warning(f"封面下载失败, 该视频改用 TG 自动抽取首帧: {url}")
+    return covers
+
+
+
+def build_live_photo_items(processed_list: Sequence[ProcessedMedia]) -> list[tuple[Path, Path, int, int, int]] | None:
+    """全部媒体都是实况照片且动图已下载时返回 (静态图, 动图, w, h, duration_ms)；否则 None。"""
+    if not processed_list:
+        return None
+    items: list[tuple[Path, Path, int, int, int]] = []
+    for processed in processed_list:
+        source = processed.source
+        if not isinstance(source, LivePhotoFile):
+            return None
+        video_path = getattr(source, "video_path", None)
+        if not video_path:
+            return None
+        file_paths = processed.output_paths or [source.path]
+        items.append(
+            (
+                Path(str(file_paths[0])),
+                Path(str(video_path)),
+                int(source.width or 0),
+                int(source.height or 0),
+                int(source.duration or 0),
+            )
+        )
+    return items
+
+
+async def send_as_live_photos(
+    sender: MessageSender,
+    items: list[tuple[Path, Path, int, int, int]],
+    caption: str,
+) -> None:
+    """以 Telegram 实况照片形式发送（照片+动图一体）。"""
+    chat_id = sender.msg.chat.id
+    ids = await send_live_photos(sender.cli, chat_id, items, caption=caption)
+    sender._delete_later([await sender.cli.get_messages(chat_id, i) for i in ids if i])
+
+
 async def send_media(
     sender: MessageSender,
     parse_result: AnyParseResult,
@@ -489,10 +548,22 @@ async def send_media(
     if len(processed_list) == 1 and isinstance(processed_list[0].source, MusicFile):
         media_list = await send_music(sender, media_refs[0], processed_list[0], caption, title=parse_result.title)
     else:
-        photos_videos, animations = build_input_media(media_refs, processed_list, video_cover=sender.config.video_cover)
-        all_count = len(photos_videos) + len(animations)
-        logger.debug(f"媒体分类完成: animations={len(animations)}, photos_videos={len(photos_videos)}")
-
+        live_items = build_live_photo_items(processed_list)
+        if live_items:
+            try:
+                await send_as_live_photos(sender, live_items, caption)
+            except Exception as e:
+                logger.warning(f"实况照片发送失败 {e}, 回退为视频")
+            else:
+                # 实况照片不写缓存: 缓存里只有静态 file_id, 复述会丢动态
+                return None
+        with tempfile.TemporaryDirectory(prefix="tgcover_") as _cover_dir:
+            covers = await _prefetch_covers(media_refs, Path(_cover_dir)) if sender.config.video_cover else {}
+            photos_videos, animations = build_input_media(
+                media_refs, processed_list, video_cover=sender.config.video_cover, cover_map=covers
+            )
+            all_count = len(photos_videos) + len(animations)
+            logger.debug(f"媒体分类完成: animations={len(animations)}, photos_videos={len(photos_videos)}")
         if all_count == 1:
             logger.debug("单媒体模式发送")
             media_list = await send_single(sender, photos_videos, animations, caption)
@@ -604,7 +675,11 @@ def media_input(media: PathType | BinaryIO | None) -> PathType | BinaryIO:
 
 
 def build_input_media(
-    media_refs: Sequence[AnyMediaRef], processed_list: list[ProcessedMedia], *, video_cover: bool
+    media_refs: Sequence[AnyMediaRef],
+    processed_list: list[ProcessedMedia],
+    *,
+    video_cover: bool,
+    cover_map: dict[str, str] | None = None,
 ) -> tuple[list[InputMediaPhoto | InputMediaVideo], list[InputMediaAnimation]]:
     """根据处理结果和媒体引用构建 Telegram InputMedia 列表。"""
     photos_videos: list[InputMediaPhoto | InputMediaVideo] = []
@@ -625,7 +700,11 @@ def build_input_media(
                     photos_videos.append(
                         InputMediaVideo(
                             media=file_path_str,
-                            video_cover=media_ref.thumb_url if video_cover else None,
+                            thumb=(
+                                (cover_map or {}).get(str(media_ref.thumb_url))
+                                if video_cover and media_ref.thumb_url
+                                else None
+                            ),
                             duration=duration,
                             width=width,
                             height=height,
@@ -636,7 +715,7 @@ def build_input_media(
                     photos_videos.append(
                         InputMediaVideo(
                             media=processed.source.video_path,
-                            video_cover=file_path_str if video_cover else None,
+                            thumb=file_path_str if video_cover else None,
                             duration=duration,
                             width=width,
                             height=height,
@@ -673,7 +752,7 @@ async def send_single(
                     sent = await sender.streaming_video_with_cover_fallback(
                         media_input(single.media),
                         caption=caption,
-                        video_cover=single.video_cover,
+                        thumb=single.thumb,
                         duration=single.duration,
                         width=single.width,
                         height=single.height,
@@ -808,7 +887,7 @@ async def send_cached_single(sender: MessageSender, m: CacheMedia, caption: str,
             await sender.streaming_video(
                 m.file_id,
                 caption=caption,
-                video_cover=m.cover_file_id if video_cover else None,
+                thumb=m.cover_file_id if video_cover else None,
             )
         case CacheMediaType.ANIMATION:
             await sender.upload_photo()

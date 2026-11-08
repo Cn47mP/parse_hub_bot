@@ -73,7 +73,7 @@ class SettingsConfig(BaseModel):
         bool,
         Field(description="保留错误日志"),
         ConfigMetadata(ALL_SCOPES, MergeStrategy.PREFERENCE),
-    ] = False
+    ] = True
 
     hide_source: Annotated[
         bool,
