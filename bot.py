@@ -19,6 +19,7 @@ from plugins.helpers import ADMIN_COMMANDS, COMMANDS
 from plugins.parse.queue import parse_queue
 from services import cookie_health, parse_cache, persistent_cache
 from utils.bili_patch import apply as apply_bili_patch
+from utils.douyin_patch import apply as apply_douyin_patch
 from utils.event_loop import setup_optimized_event_loop
 
 pillow_heif.register_heif_opener()
@@ -29,6 +30,7 @@ if bs.debug:
 
 # parsehub 的 B 站视频详情请求未带 buvid3 指纹, 会被 B 站 412 风控拦截; 提前修补
 apply_bili_patch()
+apply_douyin_patch()
 
 setup_optimized_event_loop()
 loop = asyncio.new_event_loop()
