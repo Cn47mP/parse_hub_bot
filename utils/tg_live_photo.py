@@ -9,6 +9,10 @@ InputDocument），服务器回 400 FILE_REFERENCE_COVER_EXPIRED。
    转成 InputDocument（带 access_hash / file_reference）；
 2. messages.SendMedia / SendMultiMedia 发送
    InputMediaUploadedPhoto(file=静态照片, video=该 InputDocument, live_photo=True)。
+
+相册(multi)另有一条硬性要求：SendMultiMedia 里的 media 必须是**已上传的引用**，
+直接塞 InputMediaUploadedPhoto(file=...) 会回 400 MEDIA_INVALID。所以多张时
+照片也要先 UploadMedia 拿到 InputPhoto，再用 InputMediaPhoto(id=..., video=..., live_photo=True)。
 """
 
 from __future__ import annotations
@@ -16,11 +20,26 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from pyrogram import Client, raw
+from pyrogram import Client, raw, utils
 
 from log import logger
 
 logger = logger.bind(name="LivePhoto")
+
+
+async def _upload_photo(client: Client, peer: raw.base.InputPeer, path: str | Path) -> raw.types.InputPhoto:
+    uploaded = await client.invoke(
+        raw.functions.messages.UploadMedia(
+            peer=peer,
+            media=raw.types.InputMediaUploadedPhoto(file=await client.save_file(str(path))),
+        )
+    )
+    photo = uploaded.photo
+    return raw.types.InputPhoto(
+        id=photo.id,
+        access_hash=photo.access_hash,
+        file_reference=photo.file_reference,
+    )
 
 
 async def _upload_video(
@@ -71,6 +90,23 @@ async def _build_media(
     )
 
 
+async def _build_album_media(
+    client: Client,
+    peer: raw.base.InputPeer,
+    photo: str | Path,
+    video: str | Path | None,
+    *,
+    width: int = 0,
+    height: int = 0,
+    duration: int = 3,
+) -> raw.types.InputMediaPhoto:
+    photo_ref = await _upload_photo(client, peer, photo)
+    if not video:
+        return raw.types.InputMediaPhoto(id=photo_ref)
+    doc = await _upload_video(client, peer, video, width=width, height=height, duration=duration)
+    return raw.types.InputMediaPhoto(id=photo_ref, video=doc, live_photo=True)
+
+
 def _duration_seconds(duration_ms: int | None) -> int:
     if not duration_ms:
         return 3
@@ -80,12 +116,17 @@ def _duration_seconds(duration_ms: int | None) -> int:
 async def send_live_photos(
     client: Client,
     chat_id: int | str,
-    items: Sequence[tuple[Path, Path, int, int, int]],
+    items: Sequence[tuple[Path, Path | None, int, int, int]],
     *,
     caption: str = "",
 ) -> list[int]:
-    """items: (静态图路径, 动图视频路径, width, height, duration_ms)；返回消息 id 列表。"""
+    """items: (静态图路径, 动图视频路径或 None, width, height, duration_ms)；返回消息 id 列表。"""
     peer = await client.resolve_peer(chat_id)
+    # caption 是 build_caption 产出的 markdown/HTML 混排文本, 必须过一遍解析器
+    # 换成纯文本 + entities, 否则频道里会直接显示 ** 和 <a href> 这些标记
+    parsed = await utils.parse_text_entities(client, caption or "", None, None)
+    text = parsed["message"]
+    entities = parsed["entities"]
 
     if len(items) == 1:
         photo, video, width, height, duration = items[0]
@@ -96,21 +137,23 @@ async def send_live_photos(
             raw.functions.messages.SendMedia(
                 peer=peer,
                 media=media,
-                message=caption or "",
+                message=text,
+                entities=entities,
                 random_id=client.rnd_id(),
             )
         )
     else:
         multi: list[raw.types.InputSingleMedia] = []
         for index, (photo, video, width, height, duration) in enumerate(items):
-            media = await _build_media(
+            media = await _build_album_media(
                 client, peer, photo, video, width=width, height=height, duration=_duration_seconds(duration)
             )
             multi.append(
                 raw.types.InputSingleMedia(
                     media=media,
                     random_id=client.rnd_id(),
-                    message=caption if index == len(items) - 1 else "",
+                    message=text if index == 0 else "",
+                    entities=entities if index == 0 else None,
                 )
             )
         result = await client.invoke(
