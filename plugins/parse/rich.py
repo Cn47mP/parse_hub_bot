@@ -118,7 +118,10 @@ async def build_rich_media_blocks(
                         thumb_path = pr.output_dir / f"_thumb_{thumb_index}.jpg"
                         thumb_index += 1
                         if media_ref.thumb_url:
-                            thumb = await fetch_thumb(media_ref.thumb_url, thumb_path)
+                            _aspect = (width / height) if (width and height) else None
+                            thumb = await fetch_thumb(
+                                media_ref.thumb_url, thumb_path, aspect=_aspect
+                            )
                     blocks.append(
                         InputRichBlockVideo(
                             InputMediaVideo(

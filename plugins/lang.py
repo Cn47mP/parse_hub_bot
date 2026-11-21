@@ -4,13 +4,14 @@ from pyrogram.types import CallbackQuery, Message
 from pyrogram.types import InlineKeyboardButton as Ikb
 from pyrogram.types import InlineKeyboardMarkup as Ikm
 
+from core import ALLOWED_PARSE_USERS
 from db import get_session
 from i18n import LANG_MAP, t_
 from plugins.helpers import format_label
 from services import UserService
 
 
-@Client.on_message(filters.command("lang"))
+@Client.on_message(filters.command("lang") & filters.user(ALLOWED_PARSE_USERS))
 async def select_lang(_: Client, msg: Message) -> None:
     if not msg.from_user:
         return

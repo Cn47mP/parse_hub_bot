@@ -1645,7 +1645,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "telegraph" },
-    { name = "tgcrypto" },
+    { name = "tgcrypto-rs" },
     { name = "uvloop", marker = "sys_platform != 'win32'" },
     { name = "winloop", marker = "sys_platform == 'win32'" },
 ]
@@ -1677,7 +1677,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51,<2.1" },
     { name = "telegraph", specifier = ">=2.2.0" },
-    { name = "tgcrypto", specifier = ">=1.2.5" },
+    { name = "tgcrypto-rs", specifier = ">=2.1.14" },
     { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.22.1" },
     { name = "winloop", marker = "sys_platform == 'win32'", specifier = ">=0.3.1" },
 ]
@@ -2490,10 +2490,17 @@ wheels = [
 ]
 
 [[package]]
-name = "tgcrypto"
-version = "1.2.5"
+name = "tgcrypto-rs"
+version = "2.1.14"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/33/59/7cf5ced989e3139a791d5452d58cb8994de589576b80f9267ba76d794f6c/TgCrypto-1.2.5.tar.gz", hash = "sha256:9bc2cac6fb9a12ef5b08f3dd500174fe374d89b660cce981f57e3138559cb682", size = 37280, upload-time = "2022-11-11T19:55:11.436Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/60/8f977be807a699a403606d0410bef4f88f6a8b765f1910e3a2a11b4794ba/tgcrypto_rs-2.1.14.tar.gz", hash = "sha256:54253d03ff8d6777b3f5d41744e7a7de6b4ec45042a9b16c4d64d5cf5addd1db", size = 66289, upload-time = "2026-02-22T12:59:36.163Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/31/8c/32108e5082e49ded53336976cb56bd5e66b5a5b55417e846770eba5f7fc9/tgcrypto_rs-2.1.14-cp312-cp312-manylinux_2_38_aarch64.whl", hash = "sha256:d51b5d8b56b48ca9fb71d2658034c04bcab0e11b192f85c94ed821a5d269c520", size = 2375008, upload-time = "2026-02-22T12:59:28.269Z" },
+    { url = "https://files.pythonhosted.org/packages/da/98/27510507e569b6e300eb39fdc842d671847332bc217b6995073b9dcc0f95/tgcrypto_rs-2.1.14-cp312-cp312-manylinux_2_38_x86_64.whl", hash = "sha256:3757757a31fea7184eed2556af9886584ca0ab55b5023f5a015e8336b77dc965", size = 2569820, upload-time = "2026-02-22T12:59:30.018Z" },
+    { url = "https://files.pythonhosted.org/packages/50/65/0ac7e643df568efc93e79b61fdcbdadc4ddacacfe439de70bc1415d543f3/tgcrypto_rs-2.1.14-cp312-cp312-win_amd64.whl", hash = "sha256:77252c914a490bd0417bb1454148af546add90c1c548130f5540a11d345fac47", size = 186309, upload-time = "2026-02-22T12:59:31.666Z" },
+    { url = "https://files.pythonhosted.org/packages/ad/b7/adf8b8abec6b074d16151388cf3988382b3353b3d3f7e3a3ed882fde93f3/tgcrypto_rs-2.1.14-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:3943cbfef21e278fdeef5a90a86a3b7ed9769d0e4e3ae21d46fe891e0a70fdba", size = 290241, upload-time = "2026-02-22T12:59:32.806Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/b4/b905068000b4458d319d00f0bee372c742329712e25c52ee73fbf22212d1/tgcrypto_rs-2.1.14-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:8f0336dcf7baceb6c3a92e6990683998a02a8a293c192ce0a3b24ceccf17c164", size = 267085, upload-time = "2026-02-22T12:59:34.289Z" },
+]
 
 [[package]]
 name = "tiktoken"

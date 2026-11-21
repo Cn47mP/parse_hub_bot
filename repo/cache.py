@@ -63,3 +63,8 @@ class CacheRepo:
             return 0
         await self._session.execute(delete(Cache).where(Cache.key.in_(keys)))
         return len(keys)
+
+    async def clear_all(self) -> int:
+        """清空全部缓存条目（服务启动时调用，避免旧 file_id 导致绕过转码）"""
+        result = await self._session.execute(delete(Cache))
+        return result.rowcount or 0

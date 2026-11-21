@@ -15,7 +15,7 @@ from pyrogram.types import (
     Message,
 )
 
-from core import bs
+from core import ALLOWED_PARSE_USERS, bs
 from db import get_session
 from i18n import t_
 from log import logger
@@ -64,6 +64,10 @@ async def call_guest_parse(cli: Client, message: Message) -> None:
     if not message.guest_query_id:
         return
     from_user = message.from_user.id if message.from_user else 0
+    # 白名单：非白名单用户直接忽略
+    if ALLOWED_PARSE_USERS and from_user not in ALLOWED_PARSE_USERS:
+        logger.info(f"guest 非白名单用户忽略: from_user={from_user}")
+        return
     async with get_session() as session:
         lang = await UserService(session).get_lang(from_user)
         config = await SettingsService(session).get_config_by_user(from_user)

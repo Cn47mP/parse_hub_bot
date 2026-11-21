@@ -1,12 +1,13 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
+from core import ALLOWED_PARSE_USERS
 from db import get_session
 from plugins.helpers import build_help_rich_message
 from services import UserService
 
 
-@Client.on_message(filters.command(["start", "help"]))
+@Client.on_message(filters.command(["start", "help"]) & filters.user(ALLOWED_PARSE_USERS))
 async def start(cli: Client, msg: Message) -> None:
     if not msg.from_user or msg.chat is None or msg.chat.id is None:
         return

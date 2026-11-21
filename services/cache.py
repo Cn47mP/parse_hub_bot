@@ -69,6 +69,12 @@ class TTLCache:
             self.logger.debug(f"缓存 pop 命中: key={key}")
             return value
 
+    async def clear(self) -> None:
+        """清空内存缓存（服务启动时调用，避免旧 file_id 缓存导致绕过转码）"""
+        async with self._lock:
+            self._store.clear()
+        self.logger.debug(f"内存缓存已清空: {len(self._store)} 条")
+
     def start_cleanup(self) -> None:
         """启动后台清理任务（需在事件循环运行后调用）"""
         if self._cleanup_task is None:
@@ -104,6 +110,11 @@ class CacheMedia(BaseModel):
     type: CacheMediaType
     file_id: str
     cover_file_id: str | None = None
+    # 缓存重发时直接传给 Telegram 的尺寸, 缺失(旧缓存)时为 0 -> 由发送方兜底
+    width: int = 0
+    height: int = 0
+    # source.duration 可能是浮点秒数(如 48.644), 用 float 接收避免校验失败
+    duration: float = 0
 
 
 class CacheEntry(BaseModel):
@@ -179,6 +190,13 @@ class PersistentCache:
         key = self._make_key(url)
         async with get_session() as session:
             await CacheRepo(session).remove_by_key(key)
+
+    async def clear_all(self) -> int:
+        """清空全部持久缓存（服务启动时调用，避免旧 file_id 导致绕过转码）"""
+        if self._disable:
+            return 0
+        async with get_session() as session:
+            return await CacheRepo(session).clear_all()
 
     async def _evict_overflow(self, repo: CacheRepo) -> int:
         if self._max_entries <= 0:

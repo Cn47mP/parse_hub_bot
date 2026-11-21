@@ -4,6 +4,7 @@ from pyrogram.enums import ChatType
 from pyrogram.errors import RPCError
 from pyrogram.types import CallbackQuery, InputRichBlockSectionHeading, InputRichMessage, Message
 
+from core import ALLOWED_PARSE_USERS
 from db import get_session
 from i18n import t_
 from plugins.helpers import _r, format_label
@@ -31,12 +32,12 @@ from services.settings import (
 )
 
 
-@Client.on_message(filters.command("cfg"))
+@Client.on_message(filters.command("cfg") & filters.user(ALLOWED_PARSE_USERS))
 async def cfg(cli: Client, msg: Message) -> None:
     await cfg_command(cli, msg, legacy=False)
 
 
-@Client.on_message(filters.command("ocfg"))
+@Client.on_message(filters.command("ocfg") & filters.user(ALLOWED_PARSE_USERS))
 async def ocfg(cli: Client, msg: Message) -> None:
     await cfg_command(cli, msg, legacy=True)
 
