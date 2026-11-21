@@ -35,7 +35,6 @@ apply_douyin_patch()
 apply_weibo_patch()
 
 setup_optimized_event_loop()
-loop = asyncio.new_event_loop()
 
 
 class Bot(Client):
@@ -50,7 +49,6 @@ class Bot(Client):
             plugins={"root": "plugins"},
             proxy=self.cfg.bot_proxy,
             ipv6=self.cfg.bot_ipv6,
-            loop=loop,
             workdir=self.cfg.sessions_path,
         )
 
