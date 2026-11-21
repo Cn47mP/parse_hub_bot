@@ -186,12 +186,8 @@ async def _handle_parse_request(req: ParseRequest) -> bool:
     else:
         if not r:
             return False
-        if req.delete_share_url_msg:
-            logger.debug(f"自动删除分享链接消息: chat_id={req.chat_id}, msg_id: {req.msg.id}")
-            try:
-                await req.msg.delete()
-            except Exception as e:
-                logger.warning(f"删除分享链接消息失败: chat_id={req.chat_id}, msg_id: {req.msg.id}, error: {e}")
+        # 自动删除原消息统一由 ParseQueue 按「消息级批次」处理：
+        # 多链接消息要等全部链接都结束后只删一次，有失败则保留；单链接消息行为不变。
         return True
 
 
@@ -346,10 +342,13 @@ async def handle_parse(req: ParseRequest) -> bool:
 
         if req.config.rich_media_mode and is_rich_media_result(parse_result):
             skip_gifs = (
-                sum(isinstance(m, AniRef) for m in to_list(parse_result.media)) > GIF_ONLY_SKIP_DOWNLOAD_COUNT_THRESHOLD
+                sum(isinstance(m, AniRef) for m in to_list(parse_result.media))
+                > GIF_ONLY_SKIP_DOWNLOAD_COUNT_THRESHOLD
             )
             try:
-                blocks = await build_rich_media_blocks(result, video_cover=req.config.video_cover, skip_gifs=skip_gifs)
+                blocks = await build_rich_media_blocks(
+                    result, video_cover=req.config.video_cover, skip_gifs=skip_gifs
+                )
                 caption_blocks = rich_caption_blocks(
                     parse_result.title,
                     parse_result.content,

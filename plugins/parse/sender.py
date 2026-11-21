@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from itertools import batched
 from pathlib import Path
+from PIL import Image
 from typing import Any, BinaryIO, cast
 
 from easy_ai18n import PreLocaleSelector
@@ -49,6 +50,7 @@ from plugins.helpers import build_caption, build_caption_by_str, format_label
 from plugins.parse.cache import (
     build_cached_media_group,
     cache_media_from_message,
+    safe_cover_file_id,
     cache_media_from_rich_message,
 )
 from plugins.parse.rich import (
@@ -60,7 +62,7 @@ from plugins.parse.rich import (
 )
 from repo.settings import SettingsConfig
 from services import CacheEntry, CacheMedia, CacheMediaType, CacheParseResult, PipelineResult, StatusReporter
-from services.media import ProcessedMedia, fetch_thumb, resolve_media_info
+from services.media import ProcessedMedia, fetch_thumb, make_thumb, resolve_media_info
 from utils.helpers import pack_dir_to_tar_gz, to_list
 
 logger = logger.bind(name="ParseSender")
@@ -237,6 +239,7 @@ class MessageSender:
         *,
         caption: str | None = None,
         thumb: PathType | BinaryIO | None = None,
+        video_cover: PathType | BinaryIO | str | None = None,
         duration: int | None = None,
         width: int | None = None,
         height: int | None = None,
@@ -250,9 +253,12 @@ class MessageSender:
                     video,
                     caption=caption or "",
                     thumb=thumb,
-                    duration=duration or 0,
-                    width=width or 0,
-                    height=height or 0,
+                    video_cover=video_cover,
+                    # Telegram 的 DocumentAttributeVideo.duration 是整数秒;
+                    # source.duration 可能是浮点(如 48.644), 必须取整
+                    duration=int(duration or 0),
+                    width=int(width or 0),
+                    height=int(height or 0),
                     supports_streaming=True if supports_streaming is None else supports_streaming,
                 )
             ),
@@ -264,6 +270,7 @@ class MessageSender:
         *,
         caption: str | None = None,
         thumb: PathType | BinaryIO | None = None,
+        video_cover: PathType | BinaryIO | str | None = None,
         duration: int | None = None,
         width: int | None = None,
         height: int | None = None,
@@ -272,6 +279,7 @@ class MessageSender:
             video,
             caption=caption,
             thumb=thumb,
+            video_cover=video_cover,
             duration=duration,
             width=width,
             height=height,
@@ -477,23 +485,77 @@ async def send_zip(
             os.remove(pack_path)
 
 
-async def _prefetch_covers(media_refs: Sequence[AnyMediaRef], tmpdir: Path) -> dict[str, str]:
+# 封面长宽比与视频长宽比的相对偏差超过该比例就不传封面(改用 TG 抽帧)。
+# 抖音封面常被裁成 ~4:3 横图(实测 439x330 / 320x240), 贴到 9:16 竖屏视频上约 136% 偏差,
+# 必丢弃。竖图 3:4(33%)、2:3(18%) 与 9:16 接近, 交给 Telegram 裁切即可, 应保留。
+# 故阈值取 0.40: 放过竖图各类比例, 拦住横图。
+COVER_ASPECT_TOLERANCE = 0.40
+
+
+def _aspect_mismatch(cover_w: int, cover_h: int, video_w: int, video_h: int) -> float:
+    """返回封面与视频长宽比的相对偏差(0 表示完全一致); 信息不全返回 0。"""
+    if not (cover_w and cover_h and video_w and video_h):
+        return 0.0
+    cover_ratio = cover_w / cover_h
+    video_ratio = video_w / video_h
+    return abs(cover_ratio - video_ratio) / video_ratio
+
+
+async def _prefetch_covers(
+    media_refs: Sequence[AnyMediaRef],
+    processed_list: Sequence[ProcessedMedia],
+    tmpdir: Path,
+) -> dict[str, str]:
     """把视频封面 URL 预下载为本地 JPEG 再上传。
 
     Telegram 服务端直接去抓远程 URL 拉封面不可靠: 会触发 WEBPAGE_CURL_FAILED,
     且实测同一视频用 URL 封面发出后客户端不自动播放, 改成本地封面即正常。
-    下载失败则回退为不传封面, 由 Telegram 自动抽取首帧。
+
+    下载失败、或封面长宽比与视频长宽比明显不符(平台裁图)时都不传封面,
+    交给 Telegram 自动抽取首帧, 避免封面被拉伸变形。
     """
     covers: dict[str, str] = {}
     for idx, ref in enumerate(media_refs):
         url = getattr(ref, "thumb_url", None)
         if not url:
             continue
+        video_w = getattr(ref, "width", 0) or 0
+        video_h = getattr(ref, "height", 0) or 0
+        # 先不带裁切下载一次, 得到封面真实尺寸后再判断偏差
         local = await fetch_thumb(str(url), tmpdir / f"_cover_{idx}.jpg")
-        if local:
-            covers[str(url)] = local
-        else:
+        if not local:
             logger.warning(f"封面下载失败, 该视频改用 TG 自动抽取首帧: {url}")
+            continue
+
+        try:
+            with Image.open(local) as img:
+                cover_w, cover_h = img.size
+        except Exception:
+            covers[str(url)] = local
+            continue
+
+        diff = _aspect_mismatch(cover_w, cover_h, video_w, video_h)
+        if diff > COVER_ASPECT_TOLERANCE:
+            logger.info(
+                f"封面比例偏差过大, 改用 TG 抽帧: cover={cover_w}x{cover_h} "
+                f"video={video_w}x{video_h} 偏差={diff:.1%}"
+            )
+            Path(local).unlink(missing_ok=True)
+            continue
+
+        # 偏差可接受 -> 按视频比例裁切后重新生成, 避免 TG 拉伸铺满
+        if diff > 0:
+            cropped = make_thumb(local, local, aspect=video_w / video_h)
+            if cropped:
+                with Image.open(cropped) as img2:
+                    logger.info(
+                        f"封面已裁切对齐视频比例: {cover_w}x{cover_h} -> "
+                        f"{img2.width}x{img2.height} (video {video_w}x{video_h}, 偏差={diff:.1%})"
+                    )
+                covers[str(url)] = cropped
+                continue
+
+        covers[str(url)] = local
     return covers
 
 
@@ -558,18 +620,23 @@ async def send_media(
                 # 实况照片不写缓存: 缓存里只有静态 file_id, 复述会丢动态
                 return None
         with tempfile.TemporaryDirectory(prefix="tgcover_") as _cover_dir:
-            covers = await _prefetch_covers(media_refs, Path(_cover_dir)) if sender.config.video_cover else {}
+            covers = (
+                await _prefetch_covers(media_refs, processed_list, Path(_cover_dir))
+                if sender.config.video_cover
+                else {}
+            )
             photos_videos, animations = build_input_media(
                 media_refs, processed_list, video_cover=sender.config.video_cover, cover_map=covers
             )
             all_count = len(photos_videos) + len(animations)
             logger.debug(f"媒体分类完成: animations={len(animations)}, photos_videos={len(photos_videos)}")
-        if all_count == 1:
-            logger.debug("单媒体模式发送")
-            media_list = await send_single(sender, photos_videos, animations, caption)
-        else:
-            logger.debug(f"多媒体模式发送: total={all_count}")
-            media_list = await send_multi(sender, photos_videos, animations, caption, media_refs, _t=_t)
+            # 发送必须在 with 内: 临时封面目录一旦退出就被删, 上传时会 FileNotFoundError 而退回文件模式
+            if all_count == 1:
+                logger.debug("单媒体模式发送")
+                media_list = await send_single(sender, photos_videos, animations, caption)
+            else:
+                logger.debug(f"多媒体模式发送: total={all_count}")
+                media_list = await send_multi(sender, photos_videos, animations, caption, media_refs, _t=_t)
 
     if media_list is None:
         return None
@@ -884,10 +951,16 @@ async def send_cached_single(sender: MessageSender, m: CacheMedia, caption: str,
             await sender.photo(m.file_id, caption=caption)
         case CacheMediaType.VIDEO:
             await sender.upload_video()
+            # video_cover= 接受 file_id, 但内部按 FileType.PHOTO 解析; 历史缓存里的 Thumbnail
+            # 会让 Tg 报 "Expected PHOTO, got THUMBNAIL", 因此统一经 safe_cover_file_id 校验,
+            # 不可用时退回 TG 自动抽帧。
             await sender.streaming_video(
                 m.file_id,
                 caption=caption,
-                thumb=m.cover_file_id if video_cover else None,
+                video_cover=safe_cover_file_id(m.cover_file_id) if video_cover else None,
+                duration=m.duration,
+                width=m.width,
+                height=m.height,
             )
         case CacheMediaType.ANIMATION:
             await sender.upload_photo()

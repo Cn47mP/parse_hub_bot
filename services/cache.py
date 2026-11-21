@@ -110,6 +110,11 @@ class CacheMedia(BaseModel):
     type: CacheMediaType
     file_id: str
     cover_file_id: str | None = None
+    # 缓存重发时直接传给 Telegram 的尺寸, 缺失(旧缓存)时为 0 -> 由发送方兜底
+    width: int = 0
+    height: int = 0
+    # source.duration 可能是浮点秒数(如 48.644), 用 float 接收避免校验失败
+    duration: float = 0
 
 
 class CacheEntry(BaseModel):

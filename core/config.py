@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 from typing import Annotated, Any
 
 from dotenv import load_dotenv
@@ -24,9 +25,11 @@ class BotSettings(BaseSettings):
     data_path: Path = Field(default=Path("data"))
     language: str = Field(default="zh-hans")
     admin_ids: Annotated[list[int], NoDecode] = Field(default=[], description="Bot 管理员 ID, 逗号分隔")
+    # 白名单增量语义：.env 的 ALLOWED_USERS 只写「额外」用户，代码内置名单始终生效。
+    # 例外：显式设置 ALLOWED_USERS_OVERRIDE=true 时退回「覆盖」语义（此时空列表 = 不限制）。
     allowed_users: Annotated[list[int], NoDecode] = Field(
         default=[223347749, 145047838],
-        description="白名单用户 ID, 逗号分隔; 空列表=不限制",
+        description="白名单用户 ID, 逗号分隔; 增量追加到代码内置名单",
     )
     cache_max_entries: int = Field(default=30000, ge=0, description="缓存最大条数, 0 为不限制")
     max_concurrent_downloads: int = Field(
@@ -97,6 +100,39 @@ class BotSettings(BaseSettings):
             return [i.strip() for i in v.split(",") if i.strip()]
         return v
 
+    @field_validator("allowed_users", mode="before")
+    @classmethod
+    def allowed_users_merge(cls, v):
+        """白名单默认是「增量」：.env 只写额外用户，代码内置名单始终保留。
+
+        ALLOWED_USERS_OVERRIDE=true 时退回「覆盖」语义（空列表 = 不限制）。
+        """
+        builtin = BotSettings.model_fields["allowed_users"].default or []
+        builtin = [int(i) for i in builtin]
+
+        raw = os.environ.get("ALLOWED_USERS", "")
+        if v is None:
+            raw = raw if raw else ""
+        elif isinstance(v, str):
+            raw = v
+        elif isinstance(v, (list, tuple, set)):
+            raw = ",".join(str(i).strip() for i in v)
+        else:
+            raw = str(v)
+
+        items = [i.strip() for i in raw.split(",") if i.strip()]
+        if os.environ.get("ALLOWED_USERS_OVERRIDE", "").strip().lower() in ("1", "true", "yes", "on"):
+            return items
+        out: list[int] = []
+        for i in builtin + items:
+            try:
+                n = int(i)
+            except (TypeError, ValueError):
+                continue
+            if n not in out:
+                out.append(n)
+        return out
+
     @field_validator("data_path", mode="before")
     @classmethod
     def data_path_init(cls, v: str | Path) -> Path:
@@ -120,6 +156,7 @@ class WatchdogSettings(BaseSettings):
 bs = BotSettings()  # type: ignore[call-arg]
 ws = WatchdogSettings()
 
-# 白名单：从 .env 的 ALLOWED_USERS 读取（逗号分隔），空列表 = 不限制（所有用户可用）
-# 改白名单只需编辑 .env 的 ALLOWED_USERS 并重启服务，无需改代码
-ALLOWED_PARSE_USERS: list[int] = bs.allowed_users
+# 白名单：代码内置 223347749 / 145047838 始终生效，.env 的 ALLOWED_USERS 是「增量」追加。
+# 改白名单只需编辑 .env 的 ALLOWED_USERS 并重启服务，无需改代码。
+# 要改回「覆盖」语义：在 .env 写 ALLOWED_USERS_OVERRIDE=true（此时空列表 = 不限制）。
+ALLOWED_PARSE_USERS: list[int] = list(bs.allowed_users)
